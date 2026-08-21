@@ -132,11 +132,14 @@ details.plain .body :is(p,li){font-size:14px;line-height:1.6;color:var(--tint-in
 .prose pre{margin:1em 0;background:var(--code-bg);border:1px solid var(--border);border-radius:10px;
   padding:14px 16px;overflow-x:auto;color:var(--code-ink)}
 .prose pre code{background:none;border:0;padding:0;font-size:12.6px;line-height:1.55;color:inherit}
-.prose pre.mermaid{position:relative;white-space:pre;font-family:ui-monospace,Menlo,monospace;font-size:12px;
-  color:var(--muted);padding-top:26px}
-.prose pre.mermaid::before{content:"\25A2 diagram";position:absolute;top:7px;left:14px;
+/* mermaid: before render it's readable source; after render it's a centered diagram */
+.prose pre.mermaid{white-space:pre;font-family:ui-monospace,Menlo,monospace;font-size:12px;color:var(--muted)}
+.prose pre.mermaid:not([data-processed]){position:relative;padding-top:26px}
+.prose pre.mermaid:not([data-processed])::before{content:"diagram (source)";position:absolute;top:7px;left:14px;
   font:600 9.5px/1 ui-monospace,monospace;letter-spacing:.1em;text-transform:uppercase;color:var(--faint)}
-.prose pre.mermaid svg{max-width:100%;height:auto}
+.prose pre.mermaid[data-processed]{background:none;border:0;padding:8px 0;overflow-x:auto;text-align:center;
+  display:flex;justify-content:center}
+.prose pre.mermaid[data-processed] svg{max-width:100%;height:auto}
 .tablewrap{overflow-x:auto;margin:1em 0}
 .prose table{border-collapse:collapse;width:100%;font-size:13px}
 .prose th,.prose td{border:1px solid var(--border);padding:7px 11px;text-align:left;vertical-align:top}
@@ -180,6 +183,7 @@ HTML = r"""<title>Gosub Capability Model</title>
   <span style="margin-left:auto" id="fcount"></span>
 </div>
 
+<script>__MERMAID__</script>
 <script id="data" type="application/json">__DATA__</script>
 <script>
 const DATA = JSON.parse(document.getElementById('data').textContent);
@@ -253,7 +257,24 @@ function render(ver){
       sa.href='#'+sub.id; sa.dataset.target=sub.id; toc.appendChild(sa);});
   });
 
-  applyExpand(EXPANDED); wireObserver(); window.scrollTo(0,0);
+  applyExpand(EXPANDED); wireObserver(); renderDiagrams(); window.scrollTo(0,0);
+}
+
+// render <pre class="mermaid"> blocks as diagrams, themed to match the viewer
+let MERMAID_READY=false;
+function isDark(){const t=document.documentElement.getAttribute('data-theme');
+  return t==='dark' || (!t && matchMedia('(prefers-color-scheme:dark)').matches);}
+function renderDiagrams(){
+  if(typeof mermaid==='undefined') return;
+  const nodes=[...document.querySelectorAll('pre.mermaid')];
+  if(!nodes.length) return;
+  nodes.forEach(n=>{ n.removeAttribute('data-processed');
+    const src=n.getAttribute('data-diagram'); if(src!=null) n.textContent=src; });
+  try{
+    mermaid.initialize({startOnLoad:false, securityLevel:'strict', theme:isDark()?'dark':'neutral',
+      flowchart:{htmlLabels:false,useMaxWidth:true}, themeVariables:{fontFamily:'ui-sans-serif,system-ui,sans-serif'}});
+    mermaid.run({nodes});
+  }catch(e){ /* leave source visible on failure */ }
 }
 
 let EXPANDED=false;
@@ -285,8 +306,10 @@ function applyTheme(){const t=THEMES[ti];
   else document.documentElement.setAttribute('data-theme',t);
   $('#themeIcon').textContent = t==='light'?'◑':t==='dark'?'◐':'◒';
   $('#theme').title='Theme: '+t;
-  try{localStorage.setItem('gcm-theme',t);}catch(e){}}
+  try{localStorage.setItem('gcm-theme',t);}catch(e){}
+  renderDiagrams();}
 $('#theme').addEventListener('click',()=>{ti=(ti+1)%THEMES.length; applyTheme();});
+matchMedia('(prefers-color-scheme:dark)').addEventListener('change',()=>{if(THEMES[ti]==='auto')renderDiagrams();});
 applyTheme();
 
 verSel.addEventListener('change',()=>render(verSel.value));
@@ -294,7 +317,17 @@ render(verSel.value);
 </script>
 """
 
-out = HTML.replace("__CSS__", CSS).replace("__DATA__", payload)
+# Inline the vendored mermaid library so diagrams render (GitHub Pages, local file).
+# The Claude Artifact's CSP rejects the bundled library, so build with
+# EMBED_MERMAID=0 for that target — diagrams then show as labelled source.
+MERMAID = ""
+_mpath = os.path.join(HERE, "vendor", "mermaid.min.js")
+if os.path.exists(_mpath) and os.environ.get("EMBED_MERMAID", "1") != "0":
+    MERMAID = open(_mpath, encoding="utf-8").read()
+
+out = (HTML.replace("__CSS__", CSS)
+           .replace("__MERMAID__", MERMAID)
+           .replace("__DATA__", payload))
 # decode the two python-style escapes I embedded as literal text in the HTML template
 out = out.replace(r"\U0001F40B", "\U0001F40B")
 outp = os.path.join(OUT_DIR, "capability-model-viewer.html")

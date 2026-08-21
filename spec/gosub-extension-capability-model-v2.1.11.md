@@ -91,6 +91,7 @@ Both the translator and Sonar call the *same* `canonical_origin` for scope ident
 cookies.write(scope) is permitted for a cookie C iff EVERY request
 origin to which C could be emitted (its Domain/path/Secure/partition
 projection) is contained in the grant scope.
+
 Conservative default: narrow grants may set HOST-ONLY cookies only;
 a Domain= cookie requires a grant covering the whole resulting
 domain scope; :port in the grant does not confine a cookie to that
@@ -345,8 +346,9 @@ emission          SPLICE FROM THE ORIGINAL — the scratch copy decides
                   Match and emit are separate stages precisely so
                   matching can normalize without any normalized byte
                   reaching the wire
-insertion / substitution   never — no captures, no templates, no
-                  rule-derived bytes anywhere
+insertion         never — no bytes are ever added to the URL
+substitution      never — no captures, no templates, no rule-derived
+                  bytes anywhere
 ```
 
 Separating match from emit is load-bearing in both directions. Emit-side: the natural parse-and-reserialize implementation percent-re-encodes, normalizes separators, and reorders keys — each a rule-influenced byte change on the wire, the same serialization-boundary class as §15's CRLF defense; splicing from the original forecloses it. Match-side: matching on raw bytes instead would let a tracker that writes `%66bclid` (which the server decodes to `fbclid`) evade a `$removeparam=fbclid` rule, defeating the capability's whole purpose — so matching decodes and emission does not. Because every emitted byte is a byte the page itself produced, no request can be steered to an extension-chosen destination and no page state can be encoded into a request. Every other transform a list language offers — path/host/scheme changes, `regexSubstitution`, `$urltransform` with a replacement — is a redirect with rule-derived components, which the previous paragraph forbids; those rules are dropped at compile time with the same downgrade posture as unsupported modifiers, never approximated.
@@ -589,7 +591,7 @@ filtering.remote_rulesets (model C — see below; NOT a package-pinned hash):
               headers, no redirects off the declared origin
     verify:   fetched bytes must match the CATALOG-signed hash or are
               rejected; the hash never comes from the list server
-    freshness:catalog carries a signed monotonic revision + max-age;
+    freshness: catalog carries a signed monotonic revision + max-age;
               past max-age without the current revision the browser
               KEEPS the stale rules, SURFACES the staleness to the
               user (attributed, non-extension UI), and retries — for
@@ -932,23 +934,15 @@ Every extension-supplied header value is validated against the RFC 9110 field-va
 
 **Header mutation must be leak-free to stay standard-tier (the §5 outbound-mutation-is-a-sink rule).** A rule that sets or removes a permitted header only *when the top frame is `sensitive.example`*, on a request issued from a nested cross-origin frame whose server cannot otherwise see the top frame, encodes that fact into what the destination sees — an information sink with no request created and no egress granted. So a standard-tier header mutation must satisfy §5's **leak-free criterion**: its predicate may use only facts the destination already holds (the request URL, method, headers as sent, `$third-party`/`Sec-Fetch-Site`, the initiator where `Referer`/`Origin` carry it) and it must be installed by package/catalog/user, not by the worker at runtime; a mutation conditioned on a fact the observer lacks (top-frame identity from a nested frame, a referrer-suppressed initiator, any other-request/tab/page fact) composes as a source (`implicit_history`/`page_content`) and is tiered as one (loud), exactly as `network.observe` would be. The **modifiable safe-list is a positively enumerated, versioned allowlist** (not "everything except the protected set"), and it has a stated **admission criterion**, because "the value is static" is not sufficient:
 
-```text
-a header is admissible to the writable allowlist only if setting or
-removing it has NO UA-side effect of these kinds:
-  fetch      it must not make the UA request anything
-             (Link: rel=preload/prefetch/preconnect, Refresh,
-             Alt-Svc, Accept-CH, Report-To, NEL, CSP report-*)
-  navigate   Location, Refresh
-  store/trust Set-Cookie, Strict-Transport-Security, Clear-Site-Data,
-             Public-Key-Pins-class, Expect-CT
-  MIME/security semantics  Content-Type, X-Content-Type-Options,
-             Content-Disposition, CSP, Permissions-Policy,
-             COOP/COEP/CORP, X-Frame-Options, Timing-Allow-Origin,
-             Referrer-Policy, CORS headers
-  framing    Host, Origin, Sec-*, Content-Length, Transfer-Encoding,
-             Content-Encoding, Connection, Upgrade, Authorization,
-             Cookie
-```
+A header is admissible to the writable allowlist only if setting or removing it has **no UA-side effect** of these kinds:
+
+| Effect | Headers that carry it (forbidden) |
+| --- | --- |
+| **fetch** — makes the UA request something | `Link: rel=preload/prefetch/preconnect`, `Refresh`, `Alt-Svc`, `Accept-CH`, `Report-To`, `NEL`, `CSP report-*` |
+| **navigate** | `Location`, `Refresh` |
+| **store / trust** | `Set-Cookie`, `Strict-Transport-Security`, `Clear-Site-Data`, Public-Key-Pins-class, `Expect-CT` |
+| **MIME / security semantics** | `Content-Type`, `X-Content-Type-Options`, `Content-Disposition`, `CSP`, `Permissions-Policy`, `COOP`/`COEP`/`CORP`, `X-Frame-Options`, `Timing-Allow-Origin`, `Referrer-Policy`, CORS headers |
+| **framing** | `Host`, `Origin`, `Sec-*`, `Content-Length`, `Transfer-Encoding`, `Content-Encoding`, `Connection`, `Upgrade`, `Authorization`, `Cookie` |
 
 Why "static" is not enough: a rule that sets the *static* value `Link: <https://collector.publisher.example/p>; rel=preload` on responses from `clinic.example/*` makes every browser that loads clinic.example fetch the collector — the predicate (the page URL) is known to clinic.example but **not** to the collector, so a static header is history exfiltration to a *third* server; and `Content-Type: text/html` on a `text/plain` upload endpoint is stored XSS. The criterion, not the enumeration, is the boundary; the enumeration is its current evaluation, and a newly-standardized header is protected by default (absent from the allowlist) rather than exposed until someone remembers to add it.
 
@@ -1015,21 +1009,14 @@ host_permissions + DNR redirect/headers -> filtering.redirect_* /
 
 **declarativeNetRequest expands explicitly:**
 
-```text
-declarativeNetRequest        -> filtering.block(sub+main per rules),
-                                filtering.allow, filtering.upgrade_scheme
-redirect rules + host scope  -> filtering.redirect_resource(scope) or
-                                filtering.redirect_surrogate(scope)
-modifyHeaders + host scope   -> filtering.headers.*(scope)
-redirect.transform.queryTransform.removeParams
-                             -> filtering.rewrite_url(scope)
-redirect.transform (any other field: scheme/host/path/port/
-  addOrReplaceParams) and redirect.regexSubstitution
-                             -> NOT translated — rule-derived
-                                destinations (§6); rules dropped,
-                                never approximated
-declarativeNetRequestFeedback-> stats.per_rule                     [loud]
-```
+| Manifest key | Translates to |
+| --- | --- |
+| `declarativeNetRequest` | `filtering.block` (sub+main per rules), `filtering.allow`, `filtering.upgrade_scheme` |
+| redirect rules + host scope | `filtering.redirect_resource(scope)` or `filtering.redirect_surrogate(scope)` |
+| `modifyHeaders` + host scope | `filtering.headers.*(scope)` |
+| `redirect.transform.queryTransform.removeParams` | `filtering.rewrite_url(scope)` |
+| `redirect.transform` (any other field: scheme/host/path/port/addOrReplaceParams) and `redirect.regexSubstitution` | **NOT translated** — rule-derived destinations (§6); rules dropped, never approximated |
+| `declarativeNetRequestFeedback` | `stats.per_rule` (loud) |
 
 **Filter-list syntax expands the same way** (for packaged ABP/uBO text and `filtering.remote_rulesets` sources):
 
@@ -2359,45 +2346,21 @@ The confidentiality sink only appears when the extension can inject an attacker-
 
 Verdicts were sanity-checked against the shared `AdGuard/Scriptlets` catalogue (upstream for both uBO and AdGuard, ~100 operators) and uBO's `resources/scriptlets.js`; the six-row draft generalizes to a recognizable **write-only fixed-enum neutralizer** family on the standard side and the whole read-based arsenal on the loud side.
 
-```text
-operator                          reads?  writes          verdict   why
---------------------------------  ------  --------------  --------  --------------------------------
-set-constant (fixed-enum value)   no      fixed-enum,     STANDARD  clears G1-G4; integrity-only by
-  (aliases: set, abp-override)             defensive-def            the lemma. THE canonical case.
-nowebrtc / noeval (plain) /       no      noopFunc to a   STANDARD  feature-disablers: write a fixed
-  disable-feature scriptlets               named global             noop, read nothing. Same class.
-window.name-defuser               no      '' to window.name STANDARD fixed-enum write, reads nothing.
-set-local/session-storage-item    no      fixed-enum       STANDARD storage value set IS a controlled
-  (fixed-enum value or $remove$)           storage value            vocabulary (false/true/null/''/
-                                                                   yes/no/on/off/…/$remove$); NOT a
-                                                                   cookie (see below) so not a sink.
-remove-local/session-storage-item no      deletes by key   STANDARD key NAME = structure (G1 ok);
-                                                                   no value written.
-set-attr (FIXED-ENUM value,       no      fixed-enum       STANDARD fixed-enum like set-constant — an
-  non-network attribute)                   attr value               ARBITRARY static string is an
-                                                                   attacker-chosen value a page gadget
-                                                                   can use as a destination, so
-                                                                   "static" is NOT enough; and
-                                                                   href/src/action/srcset are §6 sinks.
-remove-attr / remove-class        no      removes fixed    STANDARD static selector = structure match
-  (static selector, static name)           attr/class               (G1 ok); no value written.
---------------------------------  ------  --------------  --------  --------------------------------
-trusted-set-constant / trusted-*  no/yes  ARBITRARY        LOUD     the arbitrary-value / arbitrary-code
-  (trusted-replace-*, trusted-             value or code            family; excluded by construction
-   click-element, trusted-set-cookie)                              (§8). This is where non-enum values
-                                                                   actually live in the catalogue.
-set-cookie / set-cookie-reload    no      cookie           LOUD     a cookie is a session_state DELAYED-
-                                                                   EGRESS sink (§5), auto-emitted to a
-                                                                   server — unlike localStorage above.
-json-prune / *-prune / *-response YES     transforms       LOUD     reads page JSON/response (G1) ->
-                                          page object              source + read-timing (G4).
-prevent-fetch / prevent-xhr /     YES     fixed-enum       LOUD     reads the request URL/args (G1) to
-  no-*-if / adjust-* / *-if variants       response/no-op          decide; control-dependence + timing.
-abort-on-property-read/write /    YES/    installs         LOUD     reads page access / inline-script /
-  acis / abort-on-stack-trace     n/a     accessor                 stack; page reaction unbounded.
-href-sanitizer                    YES     URL-derived      LOUD     reads an href AND writes a value
-                                          value                    derived from it — a §6-adjacent sink.
-```
+| Operator | Reads? | Writes | Verdict | Why |
+| --- | --- | --- | --- | --- |
+| `set-constant` (fixed-enum value); aliases `set`, `abp-override` | no | fixed-enum, defensive-def | **STANDARD** | clears G1–G4; integrity-only by the lemma. THE canonical case. |
+| `nowebrtc` / `noeval` (plain) / disable-feature scriptlets | no | noopFunc to a named global | **STANDARD** | feature-disablers: write a fixed noop, read nothing. Same class. |
+| `window.name-defuser` | no | `''` to `window.name` | **STANDARD** | fixed-enum write, reads nothing. |
+| `set-local`/`session-storage-item` (fixed-enum value or `$remove$`) | no | fixed-enum storage value | **STANDARD** | storage value set IS a controlled vocabulary (false/true/null/''/yes/no/on/off/…/`$remove$`); NOT a cookie (see below) so not a sink. |
+| `remove-local`/`session-storage-item` | no | deletes by key | **STANDARD** | key NAME = structure (G1 ok); no value written. |
+| `set-attr` (FIXED-ENUM value, non-network attribute) | no | fixed-enum attr value | **STANDARD** | fixed-enum like set-constant — an ARBITRARY static string is an attacker-chosen value a page gadget can use as a destination, so "static" is NOT enough; and href/src/action/srcset are §6 sinks. |
+| `remove-attr` / `remove-class` (static selector, static name) | no | removes fixed attr/class | **STANDARD** | static selector = structure match (G1 ok); no value written. |
+| `trusted-set-constant` / `trusted-*` (`trusted-replace-*`, `trusted-click-element`, `trusted-set-cookie`) | no/yes | ARBITRARY value or code | **LOUD** | the arbitrary-value / arbitrary-code family; excluded by construction (§8). This is where non-enum values actually live in the catalogue. |
+| `set-cookie` / `set-cookie-reload` | no | cookie | **LOUD** | a cookie is a session_state DELAYED-EGRESS sink (§5), auto-emitted to a server — unlike localStorage above. |
+| `json-prune` / `*-prune` / `*-response` | YES | transforms page object | **LOUD** | reads page JSON/response (G1) → source + read-timing (G4). |
+| `prevent-fetch` / `prevent-xhr` / `no-*-if` / `adjust-*` / `*-if` variants | YES | fixed-enum response/no-op | **LOUD** | reads the request URL/args (G1) to decide; control-dependence + timing. |
+| `abort-on-property-read/write` / `acis` / `abort-on-stack-trace` | YES / n/a | installs accessor | **LOUD** | reads page access / inline-script / stack; page reaction unbounded. |
+| `href-sanitizer` | YES | URL-derived value | **LOUD** | reads an href AND writes a value derived from it — a §6-adjacent sink. |
 
 ### Consequences and honest limits
 

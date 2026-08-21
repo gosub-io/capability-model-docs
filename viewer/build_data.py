@@ -19,15 +19,70 @@ def render_md(text):
     out = md.convert(text)
     for i, src in enumerate(mer):
         esc = htmlmod.escape(src)
-        out = out.replace(f"<p>MERMAIDPLACEHOLDER{i}</p>", f'<pre class="mermaid">{esc}</pre>')
-        out = out.replace(f"MERMAIDPLACEHOLDER{i}", f'<pre class="mermaid">{esc}</pre>')
+        attr = htmlmod.escape(src, quote=True)
+        tag = f'<pre class="mermaid" data-diagram="{attr}">{esc}</pre>'
+        out = out.replace(f"<p>MERMAIDPLACEHOLDER{i}</p>", tag)
+        out = out.replace(f"MERMAIDPLACEHOLDER{i}", tag)
     return out
 
+def _registry_desc_col(block_lines):
+    """The description column, detected globally: the most common start position
+    of the second field across entry-start lines (position after the first run
+    of 2+ spaces). Robust against shallow parenthetical notes."""
+    from collections import Counter
+    positions = Counter()
+    for l in block_lines:
+        if l[:1] not in (" ", "", "-"):        # entry-start line (not indented, not a -- divider)
+            m = re.search(r"\s{2,}", l)
+            if m:
+                positions[m.end()] += 1
+    return positions.most_common(1)[0][0] if positions else 38
+
+def _reg_cell(s):
+    """Format a registry cell as raw HTML: `code` spans -> <code>, everything
+    else HTML-escaped (so text like __proto__ or *x* stays literal, not markdown)."""
+    parts = s.split("`")
+    out = []
+    for i, p in enumerate(parts):
+        e = htmlmod.escape(p)
+        out.append(f"<code>{e}</code>" if i % 2 == 1 else e)
+    return "".join(out)
+
+def _registry_group_to_table(seg, col):
+    """Parse a registry group's entry lines into a raw-HTML table using the given
+    description column. A capability name that overflows the column is kept whole
+    (split at the next space); continuation lines extend the previous cell."""
+    lines = [l for l in seg if l.strip() != ""]
+    if not lines:
+        return None
+    entries = []
+    for l in lines:
+        if l[:1] != " ":                        # entry start
+            sp = col
+            if len(l) > col and l[col-1] != " " and l[col] != " ":   # col lands inside the name
+                nx = l.find(" ", col)
+                sp = nx if nx != -1 else len(l)
+            cap, desc = l[:sp].rstrip(), l[sp:].strip()
+            entries.append([cap, desc])
+        else:                                   # continuation
+            add = l[col:].strip() if l[:col].strip() == "" else l.strip()
+            if entries:
+                entries[-1][1] = (entries[-1][1] + " " + add).strip()
+            else:
+                entries.append(["", add])
+    rows = ['<table><thead><tr><th>Capability</th><th>Notes</th></tr></thead><tbody>']
+    for cap, desc in entries:
+        capcell = f"<code>{htmlmod.escape(cap)}</code>" if cap else ""
+        rows.append(f"<tr><td>{capcell}</td><td>{_reg_cell(desc)}</td></tr>")
+    rows.append("</tbody></table>")
+    return "\n".join(rows)
+
 def split_registry_md(body):
-    """Turn the §19 registry's `-- Group --` divider lines (inside one ```text
-    block) into real `### Group` headings + per-group code blocks."""
+    """Render the §19 registry: each `-- Group --` becomes a `### Group`
+    heading + a Markdown table (auto-aligned), instead of one ASCII code block."""
     def repl(block):
         lines = block.split("\n")
+        col = _registry_desc_col(lines)
         lead=[]; segs=[]; cur_label=None; cur=[]
         for ln in lines:
             dm=re.match(r'^-- (.+?) --\s*$', ln)
@@ -42,8 +97,11 @@ def split_registry_md(body):
         if any(x.strip() for x in lead):
             parts.append("```text\n"+"\n".join(lead).rstrip()+"\n```")
         for label,seg in segs:
-            txt="\n".join(seg).rstrip("\n")
-            parts.append("### "+label+"\n\n```text\n"+txt+"\n```")
+            tbl=_registry_group_to_table(seg, col)
+            if tbl:
+                parts.append("### "+label+"\n\n"+tbl)
+            else:
+                parts.append("### "+label+"\n\n```text\n"+"\n".join(seg).rstrip("\n")+"\n```")
         return "\n\n".join(parts)
     return re.sub(r"```text\n(.*?)\n```",
                   lambda m: repl(m.group(1)) if re.search(r'^-- .+ --\s*$', m.group(1), re.M) else m.group(0),
@@ -166,6 +224,8 @@ for fn in files:
         if num=="19":
             body=split_registry_md(body)
             body=re.sub(r'(?m)^(Deltas from v0\.2:)', r'### Registry deltas\n\n\1', body, count=1)
+            # break the wall-of-text deltas paragraph into one paragraph per registry version
+            body=re.sub(r'(?<!\n\n)(v0\.2\.\d+ deltas:)', r'\n\n\1', body)
         gk=guide_key_for(btitle,num)
         gobj=guides.get(gk) if gk else None
         off_subs=[m.group(1).strip() for m in re.finditer(r"(?m)^### (.+)$", body)]
