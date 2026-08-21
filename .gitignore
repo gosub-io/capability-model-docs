@@ -1,0 +1,12 @@
+# Generated version viewer (build artifact — regenerate with `cd viewer && make viewer`)
+capability-model-viewer.html
+
+# Viewer build intermediate
+viewer/data.json
+
+# Local Pages build dir (assembled in CI)
+_site/
+
+# Python
+__pycache__/
+*.pyc
